@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { isCancel, log, spinner, text } from '@clack/prompts';
@@ -65,63 +66,104 @@ async function ensureNode(opts: InstallOptions): Promise<void> {
 async function ensureSshKey(opts: InstallOptions): Promise<void> {
   const sshDir = path.join(realHome(), '.ssh');
   const pubPath = path.join(sshDir, 'id_rsa.pub');
-  const pubExists = await runCommand('test', ['-f', pubPath], { continueOnError: true });
-  if (pubExists.ok) return;
 
   if (!opts.dryRun) {
     await fs.mkdir(sshDir, { recursive: true });
   }
 
-  const email = opts.profile.config.git?.user_email ?? 'user@example.com';
-  await runCommand('ssh-keygen', ['-t', 'rsa', '-b', '4096', '-C', email, '-f', path.join(sshDir, 'id_rsa'), '-N', ''], {
-    dryRun: opts.dryRun,
-    continueOnError: true,
-  });
-  await runCommand('bash', ['-lc', 'eval "$(ssh-agent -s)" && ssh-add -K ~/.ssh/id_rsa'], {
-    dryRun: opts.dryRun,
-    continueOnError: true,
-  });
+  // Generate key if it doesn't exist
+  const pubExists = await runCommand('test', ['-f', pubPath], { continueOnError: true });
+  if (!pubExists.ok) {
+    const email = opts.profile.config.git?.user_email ?? 'user@example.com';
+    await runCommand('ssh-keygen', ['-t', 'rsa', '-b', '4096', '-C', email, '-f', path.join(sshDir, 'id_rsa'), '-N', ''], {
+      dryRun: opts.dryRun,
+      continueOnError: true,
+    });
+    await runCommand('bash', ['-lc', 'eval "$(ssh-agent -s)" && ssh-add -K ~/.ssh/id_rsa'], {
+      dryRun: opts.dryRun,
+      continueOnError: true,
+    });
+  }
 
-  // Add SSH key to GitHub if gh CLI is available
+  // Always ensure the key is on GitHub (handles re-runs where key exists but wasn't added)
   await addSshKeyToGitHub(pubPath, opts);
+
+  // Pre-trust github.com so SSH clone doesn't hang on host verification
+  const knownHostsPath = path.join(sshDir, 'known_hosts');
+  const alreadyKnown = await runCommand('grep', ['-q', 'github.com', knownHostsPath], { continueOnError: true });
+  if (!alreadyKnown.ok) {
+    if (opts.dryRun) {
+      log.info('[dry-run] ssh-keyscan github.com >> ~/.ssh/known_hosts');
+    } else {
+      const scan = await runCommand('ssh-keyscan', ['-t', 'ed25519,rsa', 'github.com'], { continueOnError: true });
+      if (scan.ok && scan.stdout) {
+        await fs.appendFile(knownHostsPath, scan.stdout + '\n');
+        log.info('✅ github.com added to known_hosts');
+      }
+    }
+  }
 }
 
 async function addSshKeyToGitHub(pubPath: string, opts: InstallOptions): Promise<void> {
+  // Try gh CLI first (if available and authenticated)
   const hasGh = await commandExists('gh');
-  if (!hasGh) return;
+  if (hasGh) {
+    const authStatus = await runCommand('gh', ['auth', 'status'], { continueOnError: true });
+    if (authStatus.ok) {
+      // Check if this key is already on GitHub
+      const existingKeys = await runCommand('gh', ['ssh-key', 'list'], { continueOnError: true });
+      if (existingKeys.ok) {
+        const pubKey = (await fs.readFile(pubPath, 'utf8')).trim();
+        const keyFingerprint = pubKey.split(' ')[1] ?? '';
+        if (keyFingerprint && existingKeys.stdout.includes(keyFingerprint)) {
+          return; // already registered
+        }
+      }
 
-  // Check if gh is authenticated
-  const authStatus = await runCommand('gh', ['auth', 'status'], { continueOnError: true });
-  if (!authStatus.ok) {
-    log.info('gh CLI not authenticated — skipping GitHub SSH key upload. Run `gh auth login` to set up.');
-    return;
-  }
+      const hostname = await runCommand('scutil', ['--get', 'ComputerName'], { continueOnError: true });
+      const keyTitle = hostname.ok ? hostname.stdout.trim() : 'macsetup';
 
-  // Check if this key is already on GitHub
-  const existingKeys = await runCommand('gh', ['ssh-key', 'list'], { continueOnError: true });
-  if (existingKeys.ok) {
-    const pubKey = (await fs.readFile(pubPath, 'utf8')).trim();
-    const keyFingerprint = pubKey.split(' ')[1] ?? '';
-    if (keyFingerprint && existingKeys.stdout.includes(keyFingerprint)) {
-      return; // already registered
+      if (opts.dryRun) {
+        log.info(`[dry-run] gh ssh-key add ${pubPath} --title "${keyTitle}"`);
+        return;
+      }
+
+      const result = await runCommand('gh', ['ssh-key', 'add', pubPath, '--title', keyTitle], { continueOnError: true });
+      if (result.ok) {
+        log.info(`SSH key added to GitHub as "${keyTitle}"`);
+        return;
+      }
     }
   }
 
-  // Get hostname for the key title
-  const hostname = await runCommand('scutil', ['--get', 'ComputerName'], { continueOnError: true });
-  const keyTitle = hostname.ok ? hostname.stdout.trim() : 'macsetup';
-
+  // Fallback: copy key to clipboard and open GitHub in Safari
   if (opts.dryRun) {
-    log.info(`[dry-run] gh ssh-key add ${pubPath} --title "${keyTitle}"`);
+    log.info('[dry-run] Would copy SSH key to clipboard and open GitHub SSH settings in Safari');
     return;
   }
 
-  const result = await runCommand('gh', ['ssh-key', 'add', pubPath, '--title', keyTitle], { continueOnError: true });
-  if (result.ok) {
-    log.info(`SSH key added to GitHub as "${keyTitle}"`);
-  } else {
-    log.warn('Could not add SSH key to GitHub. Add it manually: gh ssh-key add ~/.ssh/id_rsa.pub');
+  const pubKey = (await fs.readFile(pubPath, 'utf8')).trim();
+  try {
+    execSync('pbcopy', { input: pubKey });
+    log.info('📋 SSH public key copied to clipboard');
+  } catch {
+    log.info(`📋 SSH public key:\n${pubKey}`);
   }
+
+  log.info('🌐 Opening GitHub SSH settings in Safari...');
+  log.info('   Paste the key (already in your clipboard), give it a name, and click "Add SSH Key".');
+  try {
+    execSync('open -a Safari https://github.com/settings/ssh/new');
+  } catch {
+    log.info('   Go to: https://github.com/settings/ssh/new');
+  }
+
+  // Wait for user to confirm they've added the key
+  const confirmed = await text({
+    message: 'Press Enter once you\'ve added the SSH key to GitHub...',
+    defaultValue: '',
+  });
+  if (isCancel(confirmed)) return;
 }
 
 async function ensureGitConfig(opts: InstallOptions): Promise<void> {
