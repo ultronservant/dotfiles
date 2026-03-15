@@ -112,5 +112,5 @@ export interface ModuleV2 {
   detect(items: string[], opts: InstallOptions): Promise<DetectResult>;
   install(items: string[], opts: InstallOptions): Promise<void>;
   /** Optional per-item installer for granular progress reporting */
-  installItem?(item: string, opts: InstallOptions & { onProgress?: (line: string) => void }): Promise<void>;
+  installItem?(item: string, opts: InstallOptions & { onProgress?: (line: string) => void; pauseSpinner?: () => void; resumeSpinner?: (msg?: string) => void }): Promise<void>;
 }

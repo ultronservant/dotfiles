@@ -144,7 +144,8 @@ export async function runCommand(
   }
 }
 
-/** Run a command with full stdio inheritance — for interactive prompts (e.g. 2FA) */
+/** Run a command with full stdio inheritance — for interactive prompts (e.g. 2FA).
+ *  Clears the current terminal line first (in case a spinner is active). */
 export async function runInteractive(
   cmd: string,
   args: string[] = [],
@@ -154,6 +155,9 @@ export async function runInteractive(
     console.log(`[dry-run] ${cmd} ${args.join(' ')}`);
     return { ok: true };
   }
+  // Clear any active spinner line so the interactive command gets a clean terminal
+  process.stderr.write('\x1b[2K\r');
+  process.stdout.write('\x1b[2K\r');
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: 'inherit',

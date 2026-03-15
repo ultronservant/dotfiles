@@ -143,10 +143,12 @@ export const iosModule: ModuleV2 = {
     if (item === 'xcode') {
       await ensureXcodes(opts);
       if (!opts.dryRun) await ensureXcodesAuth();
-      // Run interactively so the user can respond to 2FA prompts
+      // Pause spinner so xcodes gets a clean terminal for 2FA input
+      opts.pauseSpinner?.();
       const result = await runInteractive('xcodes', ['install', '--latest', '--experimental-unxip'], {
         dryRun: opts.dryRun,
       });
+      opts.resumeSpinner?.();
       if (!result.ok) {
         console.error('  ⚠ xcodes install failed');
       }

@@ -77,6 +77,14 @@ export async function runModules(
                 const short = line.length > 60 ? `${line.slice(0, 57)}...` : line;
                 s.message(`${prefix} — ${short}`);
               },
+              pauseSpinner() {
+                s.stop(prefix);
+                spinnerActive = false;
+              },
+              resumeSpinner(msg?: string) {
+                s.start(msg ?? prefix);
+                spinnerActive = true;
+              },
             });
           }
           s.stop(`${module.label}: complete (${totalItems}/${totalItems})`);
